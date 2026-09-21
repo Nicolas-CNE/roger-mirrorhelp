@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <sys/stat.h>
 #include <curl/curl.h>
+#include <regex>
 
 // Importar interfaz o cabecera SAT de Roger si se compila en conjunto
 #include "RogerSAT.hpp"
@@ -26,17 +27,22 @@ size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     return fwrite(ptr, size, nmemb, stream);
 }
 
-// Cargar /etc/roger/mirrorconf.tango
+// Cargar /etc/roger/tmirrors.tango con formato MIRRORS=("..."), ("...")
 MirrorConfig load_config(const std::string& config_path) {
     MirrorConfig cfg;
     std::ifstream file(config_path);
+    
+    // Si no existe el archivo, usamos mirrors por defecto de emergencia
     if (!file.is_open()) {
+        std::cerr << "[!] No se pudo abrir " << config_path << ". Usando mirrors por defecto." << std::endl;
         cfg.arch_mirrors.push_back("https://geo.mirror.pkgbuild.com/core/os/x86_64/");
         cfg.arch_mirrors.push_back("https://geo.mirror.pkgbuild.com/extra/os/x86_64/");
         return cfg;
     }
 
     std::string line;
+    std::regex quote_regex("\"([^\"]+)\"");
+
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
 
@@ -47,15 +53,25 @@ MirrorConfig load_config(const std::string& config_path) {
 
             if (key == "TANGO_REPO") {
                 cfg.tango_repo = val;
-            } else if (key == "ARCH_MIRRORS") {
-                std::stringstream ss(val);
-                std::string mirror;
-                while (std::getline(ss, mirror, ',')) {
-                    if (!mirror.empty()) cfg.arch_mirrors.push_back(mirror);
+            } else if (key == "MIRRORS") {
+                auto words_begin = std::sregex_iterator(line.begin(), line.end(), quote_regex);
+                auto words_end = std::sregex_iterator();
+
+                for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+                    std::smatch match = *i;
+                    cfg.arch_mirrors.push_back(match[1].str());
                 }
             }
         }
     }
+
+    file.close();
+
+    // Fallback de seguridad por si el array está vacío
+    if (cfg.arch_mirrors.empty()) {
+        cfg.arch_mirrors.push_back("https://geo.mirror.pkgbuild.com/core/os/x86_64/");
+    }
+
     return cfg;
 }
 
@@ -125,13 +141,14 @@ bool install_tango_pkg(const std::string& tango_pkg_path) {
     return (res == 0);
 }
 
-// Búsqueda y descarga mediante API de Arch
+// Búsqueda y descarga mediante API de Arch leyendo tmirrors.tango
 bool fetch_and_prepare(const std::string& pkg_name, const std::string& out_tango_path) {
-    MirrorConfig cfg = load_config("/etc/roger/mirrorconf.tango");
+    MirrorConfig cfg = load_config("/etc/roger/tmirrors.tango");
 
-    std::cout << "[*] Buscando '" << pkg_name << "' en los mirrors..." << std::endl;
+    std::cout << "[*] Buscando '" << pkg_name << "' en los mirrors configurados..." << std::endl;
 
     for (const auto& mirror : cfg.arch_mirrors) {
+        std::cout << "[*] Probando mirror: " << mirror << std::endl;
         std::string api_url = "https://archlinux.org/packages/search/json/?name=" + pkg_name;
         std::string resolve_cmd = "curl -s '" + api_url + "' | grep -o '\"filename\": \"[^\"]*\"' | head -n 1 | cut -d'\"' -f4";
         
